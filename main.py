@@ -1,6 +1,10 @@
 from openai import OpenAI
 import os
 import json
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 
 with open('conf.json') as f:
     conf = json.load(f)
@@ -61,13 +65,16 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
         current_content = ""
         print("\n", end="", flush=True)
         
-        # ANSI color codes
-        GRAY = "\033[90m"  # Gray for thinking
-        WHITE = "\033[37m"  # White for answer
-        RESET = "\033[0m"  # Reset color
+        # Initialize Rich console
+        console = Console()
         
         # Track if we're in the thinking or answer section
         in_thinking = False
+        thinking_content = ""
+        answer_content = ""
+        
+        # Live content for streaming display
+        live_content = ""
         
         for chunk in response:
             try:
@@ -77,30 +84,58 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                         # This is the thinking part
                         if not in_thinking:
                             current_content += "<think>\n"
-                            print(f"\n{GRAY}<think>", flush=True)
+                            console.print("\n", end="")
                             in_thinking = True
                         content = delta.reasoning_content
-                        print(f"{GRAY}{content}{RESET}", end="", flush=True)
+                        thinking_content += content
+                        # Print thinking in dim style
+                        console.print(content, style="dim", end="", highlight=False)
                         current_content += content
                     elif hasattr(delta, 'content') and delta.content is not None:
                         # This is the answer part
                         if in_thinking:
                             current_content += "</think>\n\n"
-                            print(f"{GRAY}</think>{RESET}\n", flush=True)
+                            console.print("\n", end="")
                             in_thinking = False
+                            # Display collected thinking in a panel
+                            console.print(Panel(
+                                Text(thinking_content.strip(), style="dim"),
+                                title="Thinking Process",
+                                border_style="dim"
+                            ))
+                            console.print()  # Add spacing
                         content = delta.content
-                        print(f"{WHITE}{content}{RESET}", end="", flush=True)
+                        answer_content += content
+                        # Collect content for live display
+                        live_content += content
+                        # Print without markdown for streaming
+                        console.print(content, end="", highlight=False)
                         current_content += content
                     elif delta.role == 'assistant':
                         # Skip initial role marker
                         continue
             except Exception as e:
-                print(f"Debug: Error processing chunk: {str(e)}", flush=True)
+                console.print(f"[red]Error: {str(e)}[/red]", flush=True)
         
-        # Close thinking tags if we're still in thinking mode
+        # Close thinking tags and display final panel if we're still in thinking mode
         if in_thinking:
             current_content += "</think>\n"
-            print(f"{GRAY}</think>{RESET}", flush=True)
+            console.print("\n", end="")
+            console.print(Panel(
+                Text(thinking_content.strip(), style="dim"),
+                title="Thinking Process",
+                border_style="dim"
+            ))
+            console.print()  # Add spacing
+        
+        # Add a separator line between streaming and final rendering
+        console.print("\n")
+        console.print("─" * console.width, style="dim")
+        console.print("\n[bold blue]Final Formatted Output:[/bold blue]\n")
+        
+        # Render the final answer with proper markdown formatting
+        if answer_content.strip():
+            console.print(Markdown(answer_content.strip()))
         
         print("\n")  # New line after response
         
@@ -147,11 +182,13 @@ if __name__ == "__main__":
     history = []
     enable_thinking = True  # Default thinking mode
     
-    print("Welcome to AI Sidekick! Type 'quit' to exit.")
+    console = Console()
+    console.print("[bold blue]Welcome to AI Sidekick![/bold blue] Type [yellow]'quit'[/yellow] to exit.")
     
     while True:
         # Get user input
-        user_input = input("\nYou: ").strip()
+        console.print("\n[bold green]You:[/bold green] ", end="")
+        user_input = input().strip()
         
         # Check for exit condition
         if user_input.lower() in ['quit', 'exit']:
