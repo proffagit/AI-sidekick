@@ -1,6 +1,7 @@
 from openai import OpenAI
 import os
 import json
+import tiktoken
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -8,6 +9,26 @@ from rich.text import Text
 
 with open('conf.json') as f:
     conf = json.load(f)
+
+# Get chat sliding window size from config, default to 4000 tokens if not specified
+CHAT_SLIDING_WINDOW_MAX_TOKENS = conf.get('chat_sliding_window_max_size', 4000)
+
+def count_tokens(messages):
+    """Count the total number of tokens in a list of messages."""
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")  # This is used by gpt-3.5-turbo and gpt-4
+        num_tokens = 0
+        for message in messages:
+            # Every message follows format: {"role": "user", "content": "..."} 
+            # Add 4 tokens for message format overhead
+            num_tokens += 4
+            for key, value in message.items():
+                num_tokens += len(encoding.encode(value))
+        return num_tokens
+    except Exception as e:
+        print(f"Warning: Could not count tokens accurately: {str(e)}")
+        # Fallback to rough character-based estimate
+        return sum(len(str(m.get('content', ''))) // 4 for m in messages)
 
 def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen", temperature=0.7, max_tokens=32768, baseurl=None, enable_thinking=True):
     # Use provided baseurl or default to baseurl0
@@ -206,15 +227,20 @@ if __name__ == "__main__":
         
         # No need to print response here as it's already streamed
         
-        # Update history with the current exchange
-        if isinstance(response, dict):
-            history.extend([
-                {"role": "user", "content": user_input},
-                {"role": "assistant", "content": response["full_response"]}
-            ])
-        else:
-            # Handle case where response is a string (error message)
-            history.extend([
-                {"role": "user", "content": user_input},
-                {"role": "assistant", "content": response}
-            ])
+        # Update history with the current exchange and maintain token-based sliding window
+        new_messages = [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": response["full_response"] if isinstance(response, dict) else response}
+        ]
+        
+        # Add new messages
+        history.extend(new_messages)
+        
+        # Check token count and trim history if needed
+        while history and count_tokens(history) > CHAT_SLIDING_WINDOW_MAX_TOKENS:
+            # Remove oldest message pair (user + assistant messages)
+            if len(history) >= 2:
+                history = history[2:]
+            else:
+                # If somehow we have an odd number of messages, just remove the oldest
+                history = history[1:]
