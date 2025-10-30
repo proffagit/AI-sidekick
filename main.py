@@ -30,7 +30,7 @@ def count_tokens(messages):
         # Fallback to rough character-based estimate
         return sum(len(str(m.get('content', ''))) // 4 for m in messages)
 
-def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen", temperature=0.7, max_tokens=32768, baseurl=None, enable_thinking=True):
+def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen", temperature=0.99, max_tokens=32768, baseurl=None, enable_thinking=True):
     # Use provided baseurl or default to baseurl0
     base_url = baseurl 
     client = OpenAI(
@@ -66,7 +66,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
             response = client.chat.completions.create(
                 model="my-model",
                 messages=messages,
-                temperature=0.6,
+                temperature=0.99,
                 top_p=0.95,
                 max_tokens=max_tokens,
                 stream=True  # Stream the response
@@ -75,7 +75,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
             response = client.chat.completions.create(
                 model="my-model",
                 messages=messages,
-                temperature=0.7,
+                temperature=0.99,
                 top_p=0.8,
                 max_tokens=max_tokens,
                 stream=True  # Stream the response
@@ -198,10 +198,21 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
 
 if __name__ == "__main__":
     # Initialize conversation context, history, and system prompt
-    system_prompt = "You are a helpful AI assistant. Be concise and clear in your responses."
+    try:
+        with open('ai_personality_profile.txt', 'r') as f:
+            personality_profile = f.read()
+            system_prompt = personality_profile
+    except FileNotFoundError:
+        print("Note: AI personality profile not found, using default system prompt")
+        system_prompt = "You are a helpful AI assistant. Be concise and clear in your responses."
+    except Exception as e:
+        print(f"Warning: Could not read personality profile: {str(e)}")
+        system_prompt = "You are a helpful AI assistant. Be concise and clear in your responses."
+
     context = ""
     history = []
     enable_thinking = True  # Default thinking mode
+    total_tokens_used = 0  # Reset token counter at the start of each session
     
     console = Console()
     console.print("[bold blue]Welcome to AI Sidekick![/bold blue] Type [yellow]'quit'[/yellow] to exit.")
@@ -232,6 +243,11 @@ if __name__ == "__main__":
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": response["full_response"] if isinstance(response, dict) else response}
         ]
+        
+        # Count tokens in new messages and update total for this session
+        new_tokens = count_tokens(new_messages)
+        total_tokens_used += new_tokens
+        console.print(f"[dim]Total tokens used in this session: {total_tokens_used}[/dim]\n")
         
         # Add new messages
         history.extend(new_messages)
