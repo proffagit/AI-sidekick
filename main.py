@@ -2,10 +2,15 @@ from openai import OpenAI
 import os
 import json
 import tiktoken
+import signal
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+import requests
+import re
+import ast
+from datetime import datetime
 
 with open('conf.json') as f:
     conf = json.load(f)
@@ -29,6 +34,115 @@ def count_tokens(messages):
         print(f"Warning: Could not count tokens accurately: {str(e)}")
         # Fallback to rough character-based estimate
         return sum(len(str(m.get('content', ''))) // 4 for m in messages)
+
+
+def save_chat(history, conf, system_prompt):
+    """Summarize chat via LLM and save to ws4sqlite server."""
+    console = Console()
+    try:
+        conversation_text = "\n\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history
+        )
+
+        llm_base_url = conf['baseurl'][1]
+        client = OpenAI(base_url=llm_base_url, api_key="dummy_api_key")
+
+        system_msg = system_prompt or "You are a helpful assistant."
+        prompt = (
+            "You will receive a full chat transcript.\n"
+            "1) Produce a concise, high-signal summary.\n"
+            "2) Then produce a Python list of detailed tags that uniquely identify this chat.\n"
+            "Tags must be strings, lowercase, and specific.\n"
+            "Output format strictly as:\n"
+            "Summary: <one-line or short paragraph>\n"
+            "Tags: [\"tag1\", \"tag2\", ...]"
+        )
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt + "\n\nTranscript:\n" + conversation_text},
+        ]
+
+        resp = client.chat.completions.create(
+            model="my-model",
+            messages=messages,
+            temperature=0.5,
+            top_p=0.9,
+            max_tokens=8192,
+            stream=False,
+        )
+
+        content = resp.choices[0].message.content if resp and resp.choices else ""
+
+        m_sum = re.search(r"Summary:\s*(.+)", content, re.IGNORECASE | re.DOTALL)
+        summary = ""
+        if m_sum:
+            summary = m_sum.group(1).strip()
+            summary = re.split(r"\n\s*Tags:\s*\[", summary)[0].strip()
+        if not summary:
+            summary = content.strip()[:1000]
+
+        tags_list = []
+        m_list = re.search(r"\[(?:.|\n)*?\]", content)
+        if m_list:
+            candidate = m_list.group(0)
+            try:
+                parsed = ast.literal_eval(candidate)
+                if isinstance(parsed, list):
+                    tags_list = [str(t).strip().lower() for t in parsed if str(t).strip()]
+            except Exception:
+                pass
+        if not tags_list:
+            tags_list = [t.lower() for t in re.findall(r"['\"]([^'\"]+)['\"]", content)]
+
+        tags_field = " ".join(sorted(set(tags_list)))[:1024]
+
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        server_url = conf.get('chat_history_server_url') or "http://127.0.0.1:12321/chat_history"
+        auth_user = conf.get('chat_history_server_auth_user') or "admin"
+        auth_pass = conf.get('chat_history_server_auth_pass') or "YourSuperSecretPass123"
+
+        payload = {
+            "transaction": [
+                {
+                    "statement": "INSERT INTO chat_history (summary, tags, date, time) VALUES (:summary, :tags, :date, :time)",
+                    "values": {
+                        "summary": summary,
+                        "tags": tags_field,
+                        "date": date_str,
+                        "time": time_str,
+                    },
+                }
+            ]
+        }
+
+        r = requests.post(
+            server_url,
+            json=payload,
+            auth=(auth_user, auth_pass),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+
+        console.print()
+        console.print(Panel(
+            Text("Chat autosave complete ✓", style="bold green"),
+            title="Autosave",
+            border_style="green"
+        ))
+    except Exception as e:
+        console.print(Panel(
+            Text(f"Chat autosave failed: {str(e)}", style="bold red"),
+            title="Autosave Error",
+            border_style="red"
+        ))
+
+
+ 
 
 def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen", temperature=0.99, max_tokens=32768, baseurl=None, enable_thinking=True):
     # Use provided baseurl or default to baseurl0
@@ -217,6 +331,17 @@ if __name__ == "__main__":
     console = Console()
     console.print("[bold blue]Welcome to AI Sidekick![/bold blue] Type [yellow]'quit'[/yellow] to exit.")
     
+    # Define and register Ctrl+C handler to autosave chat with required args
+    def _handle_sigint(signum, frame):
+        try:
+            save_chat(history, conf, system_prompt)
+        finally:
+            console = Console()
+            console.print("\n[dim]Session terminated.[/dim]")
+            raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handle_sigint)
+    
     while True:
         # Get user input
         console.print("\n[bold green]You:[/bold green] ", end="")
@@ -251,6 +376,13 @@ if __name__ == "__main__":
         
         # Add new messages
         history.extend(new_messages)
+        
+        # Trigger save when total tokens cross a multiple of the sliding window size
+        window = CHAT_SLIDING_WINDOW_MAX_TOKENS
+        if window and total_tokens_used > 0:
+            prev_total = total_tokens_used - new_tokens
+            if (prev_total // window) < (total_tokens_used // window):
+                save_chat(history, conf, system_prompt)
         
         # Check token count and trim history if needed
         while history and count_tokens(history) > CHAT_SLIDING_WINDOW_MAX_TOKENS:

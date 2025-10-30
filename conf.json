@@ -4,5 +4,8 @@
     "http://192.168.1.2:8081/v1",
     "http://192.168.1.2:8081/v1"
   ],
-  "chat_sliding_window_max_size": 30000
+  "chat_sliding_window_max_size": 3000,
+  "chat_history_server_url": "http://192.168.1.2:12321/chat_history",
+  "chat_history_server_auth_user": "admin",
+  "chat_history_server_auth_pass": "YourSuperSecretPass123"
 }
