@@ -7,5 +7,6 @@
   "chat_sliding_window_max_size": 3000,
   "chat_history_server_url": "http://192.168.1.2:12321/chat_history",
   "chat_history_server_auth_user": "admin",
-  "chat_history_server_auth_pass": "YourSuperSecretPass123"
+  "chat_history_server_auth_pass": "YourSuperSecretPass123",
+  "max_chat_history_results": 100
 }
