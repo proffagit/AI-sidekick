@@ -445,6 +445,9 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
         answer_content = ""
         live_content = ""
         
+        # Track how many lines we've printed for cleanup
+        lines_printed = 0
+        
         for chunk in response:
             try:
                 if hasattr(chunk, 'choices') and chunk.choices:
@@ -464,10 +467,13 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                         if not in_thinking:
                             current_content += "<think>\n"
                             console.print("\n", end="")
+                            lines_printed += 1
                             in_thinking = True
                         content = delta.reasoning_content
                         thinking_content += content
                         console.print(content, style="dim", end="", highlight=False)
+                        # Count newlines for cleanup
+                        lines_printed += content.count('\n')
                         current_content += content
 
                     elif hasattr(delta, 'content') and delta.content is not None:
@@ -475,17 +481,14 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                         if in_thinking:
                             current_content += "</think>\n\n"
                             console.print("\n", end="")
+                            lines_printed += 1
                             in_thinking = False
-                            console.print(Panel(
-                                Text(thinking_content.strip(), style="dim"),
-                                title="Thinking Process",
-                                border_style="dim"
-                            ))
-                            console.print()
                         content = delta.content
                         answer_content += content
                         live_content += content
                         console.print(content, end="", highlight=False)
+                        # Count newlines for cleanup
+                        lines_printed += content.count('\n')
                         current_content += content
 
                     elif getattr(delta, "role", None) == "assistant":
@@ -505,22 +508,17 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
         if in_thinking:
             current_content += "</think>\n"
             console.print("\n", end="")
-            console.print(Panel(
-                Text(thinking_content.strip(), style="dim"),
-                title="Thinking Process",
-                border_style="dim"
-            ))
-            console.print()
+            lines_printed += 1
         
-        console.print("\n")
-        console.print("─" * console.width, style="dim")
-        console.print("\n[bold blue]Final Formatted Output:[/bold blue]\n")
+        # Clear the streamed output before showing formatted version
+        # Move cursor up and clear lines
+        for _ in range(lines_printed + 5):  # Extra buffer for safety
+            console.print("\033[F\033[K", end="")  # Move up one line and clear it
         
-        if answer_content.strip():
-            console.print(Markdown(answer_content.strip()))
+        # Now print the clean formatted output
+        console.print()
         
-        print("\n")  # newline after output
-        
+        # Extract thinking and answer
         full_content = current_content
         think_match = ""
         answer = ""
@@ -534,6 +532,24 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                 answer = full_content.strip()
         else:
             answer = full_content.strip()
+        
+        # Print formatted thinking if present
+        if think_match:
+            console.print(Panel(
+                Text(think_match, style="dim"),
+                title="Thinking Process",
+                border_style="dim"
+            ))
+            console.print()
+        
+        # Print formatted answer
+        console.print("─" * console.width, style="dim")
+        console.print("\n[bold blue]Final Formatted Output:[/bold blue]\n")
+        
+        if answer:
+            console.print(Markdown(answer))
+        
+        print("\n")  # newline after output
         
         return {
             "thinking": think_match,
