@@ -15,90 +15,98 @@ import threading
 import time
 from contextlib import contextmanager
 
-# Global spinner state (supports nested usage across functions)
+# ====================== FIXED SPINNER IMPLEMENTATION ======================
+
 _spinner_lock = threading.Lock()
-_spinner_counter = 0
-_spinner_stop_event = None
 _spinner_thread = None
+_spinner_stop_event = None
+_spinner_depth = 0
+
 
 def _spinner_worker(stop_event):
-    frames = ["-", "/", "|", "\\"]
+    """Threaded spinner worker with clean stop and safe console output."""
+
+    frames = [
+    "▏        ▕", "▎       ▕", "▍      ▕", "▌     ▕", "▋    ▕", "▊   ▕", "▉  ▕",
+    "█ ▕", " ▉▏", "  ▊▏", "   ▋▏", "    ▌▏", "     ▍▏", "      ▎▏", "       ▏▏"
+    ]
+
+
+    console = Console()
     i = 0
-    local_console = Console()
     while not stop_event.is_set():
         frame = frames[i % len(frames)]
-        local_console.print(f"[dim]{frame}[/dim]", end="\r", highlight=False)
-        i += 1
+        console.print(f"[dim]{frame}[/dim]", end="\r", highlight=False)
         time.sleep(0.08)
+        i += 1
+    console.print(" " * 10, end="\r", highlight=False)  # Clear spinner
+
 
 def start_processing_spinner():
-    """Start a subtle, global inline spinner. Returns a stop() callable.
-
-    Safe for nested calls; only the outermost start actually spawns the thread.
     """
-    global _spinner_counter, _spinner_thread, _spinner_stop_event
+    Start a global spinner. Thread-safe and re-entrant.
+    Returns a callable to stop it.
+    """
+    global _spinner_depth, _spinner_thread, _spinner_stop_event
     with _spinner_lock:
-        if _spinner_counter == 0:
+        if _spinner_depth == 0:
             _spinner_stop_event = threading.Event()
-            _spinner_thread = threading.Thread(target=_spinner_worker, args=(_spinner_stop_event,), daemon=True)
+            _spinner_thread = threading.Thread(
+                target=_spinner_worker, args=(_spinner_stop_event,), daemon=True
+            )
             _spinner_thread.start()
-        _spinner_counter += 1
+        _spinner_depth += 1
 
     def _stop():
-        global _spinner_counter, _spinner_stop_event
+        global _spinner_depth, _spinner_thread, _spinner_stop_event
         with _spinner_lock:
-            if _spinner_counter > 0:
-                _spinner_counter -= 1
-                if _spinner_counter == 0 and _spinner_stop_event is not None:
+            if _spinner_depth > 0:
+                _spinner_depth -= 1
+                if _spinner_depth == 0 and _spinner_stop_event:
                     _spinner_stop_event.set()
-                    try:
-                        Console().print(" " * 10, end="\r")
-                    except Exception:
-                        pass
+                    _spinner_thread.join(timeout=0.2)
+                    _spinner_thread = None
+                    _spinner_stop_event = None
+
     return _stop
+
 
 @contextmanager
 def processing_spinner():
-    """Context manager wrapper around start_processing_spinner()."""
+    """Context manager wrapper for spinner usage (safe for nested calls)."""
     stop = start_processing_spinner()
     try:
         yield
     finally:
         stop()
 
+# ====================== END SPINNER FIX ======================
+
+
 with open('conf.json') as f:
     conf = json.load(f)
 
-# Get chat sliding window size from config, default to 4000 tokens if not specified
 CHAT_SLIDING_WINDOW_MAX_TOKENS = conf.get('chat_sliding_window_max_size', 4000)
-
-# Prevent double-saving on autosave and Ctrl+C in quick succession
 keyboard_interupt_double_autosave_prevention_bool = False
 
+
 def count_tokens(messages):
-    """Count the total number of tokens in a list of messages."""
+    """Count tokens in messages safely."""
     try:
-        encoding = tiktoken.get_encoding("cl100k_base")  # This is used by gpt-3.5-turbo and gpt-4
+        encoding = tiktoken.get_encoding("cl100k_base")
         num_tokens = 0
         for message in messages:
-            # Every message follows format: {"role": "user", "content": "..."} 
-            # Add 4 tokens for message format overhead
             num_tokens += 4
             for key, value in message.items():
                 num_tokens += len(encoding.encode(value))
         return num_tokens
     except Exception as e:
         print(f"Warning: Could not count tokens accurately: {str(e)}")
-        # Fallback to rough character-based estimate
         return sum(len(str(m.get('content', ''))) // 4 for m in messages)
 
 
 def generate_chat_tags(history, conf, system_prompt, current_user_input=None):
-    """Generate detailed, lowercase tags from the chat transcript using the LLM."""
-    # Build conversation text; include current user input when provided
-    parts = [
-        f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history
-    ]
+    parts = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history]
     if current_user_input:
         parts.append(f"user: {current_user_input}")
     conversation_text = "\n\n".join(parts)
@@ -131,8 +139,8 @@ def generate_chat_tags(history, conf, system_prompt, current_user_input=None):
         )
 
     content = resp.choices[0].message.content if resp and resp.choices else ""
-
     tags_list = []
+
     m_list = re.search(r"\[(?:.|\n)*?\]", content)
     if m_list:
         candidate = m_list.group(0)
@@ -145,9 +153,7 @@ def generate_chat_tags(history, conf, system_prompt, current_user_input=None):
     if not tags_list:
         tags_list = [t.lower() for t in re.findall(r"['\"]([^'\"]+)['\"]", content)]
 
-    # Normalize: lowercase already; replace spaces with '-', remove invalid chars, collapse '-' runs
-    normalized = []
-    seen = set()
+    normalized, seen = [], set()
     for raw in tags_list:
         t = str(raw).strip().lower()
         if not t or t == 'empty_transcript':
@@ -155,36 +161,28 @@ def generate_chat_tags(history, conf, system_prompt, current_user_input=None):
         t = re.sub(r"\s+", "-", t)
         t = re.sub(r"[^a-z0-9\-]", "-", t)
         t = re.sub(r"-+", "-", t).strip('-')
-        if not t:
-            continue
-        if t in seen:
-            continue
-        seen.add(t)
-        normalized.append(t)
-
+        if t and t not in seen:
+            seen.add(t)
+            normalized.append(t)
     return normalized
 
 
 def save_chat(history, conf, system_prompt):
-    """Summarize chat via LLM and save to ws4sqlite server."""
     console = Console()
     try:
         conversation_text = "\n\n".join(
             f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history
         )
-
         llm_base_url = conf['baseurl'][1]
         client = OpenAI(base_url=llm_base_url, api_key="dummy_api_key")
 
         system_msg = system_prompt or "You are a helpful assistant."
         prompt = (
             "You will receive a full chat transcript.\n"
-            "1) Produce a concise, high-signal summary.\n"
-            "2) Then produce a Python list of detailed tags that uniquely identify this chat.\n"
-            "Tags must be strings, lowercase, and specific.\n"
-            "Output format strictly as:\n"
-            "Summary: <one-line or short paragraph>\n"
-            "Tags: [\"tag1\", \"tag2\", ...]"
+            "1) Produce a concise summary.\n"
+            "2) Then produce tags.\n"
+            "Output format:\n"
+            "Summary: <text>\nTags: [\"tag1\", \"tag2\", ...]"
         )
 
         messages = [
@@ -203,27 +201,16 @@ def save_chat(history, conf, system_prompt):
             )
 
         content = resp.choices[0].message.content if resp and resp.choices else ""
-
         m_sum = re.search(r"Summary:\s*(.+)", content, re.IGNORECASE | re.DOTALL)
         summary = ""
         if m_sum:
-            summary = m_sum.group(1).strip()
-            summary = re.split(r"\n\s*Tags:\s*\[", summary)[0].strip()
+            summary = m_sum.group(1).strip().split("\nTags:")[0].strip()
         if not summary:
             summary = content.strip()[:1000]
 
-        # Use shared tag generator for consistency
-        tags_list = generate_chat_tags(history, conf, system_prompt)
-        tags_field = " ".join(sorted(set(tags_list)))[:1024]
+        tags_field = " ".join(sorted(set(generate_chat_tags(history, conf, system_prompt))))[:1024]
 
         now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H:%M:%S")
-
-        server_url = conf.get('chat_history_server_url') or "http://127.0.0.1:12321/chat_history"
-        auth_user = conf.get('chat_history_server_auth_user') or "admin"
-        auth_pass = conf.get('chat_history_server_auth_pass') or "YourSuperSecretPass123"
-
         payload = {
             "transaction": [
                 {
@@ -231,8 +218,8 @@ def save_chat(history, conf, system_prompt):
                     "values": {
                         "summary": summary,
                         "tags": tags_field,
-                        "date": date_str,
-                        "time": time_str,
+                        "date": now.strftime("%Y-%m-%d"),
+                        "time": now.strftime("%H:%M:%S"),
                     },
                 }
             ]
@@ -240,26 +227,22 @@ def save_chat(history, conf, system_prompt):
 
         with processing_spinner():
             r = requests.post(
-                server_url,
+                conf.get('chat_history_server_url', "http://127.0.0.1:12321/chat_history"),
                 json=payload,
-                auth=(auth_user, auth_pass),
+                auth=(
+                    conf.get('chat_history_server_auth_user', "admin"),
+                    conf.get('chat_history_server_auth_pass', "YourSuperSecretPass123"),
+                ),
                 headers={"Content-Type": "application/json"},
                 timeout=10,
             )
         r.raise_for_status()
 
-        console.print()
-        console.print(Panel(
-            Text("Chat autosave complete ✓", style="bold green"),
-            title="Autosave",
-            border_style="green"
-        ))
+        console.print(Panel(Text("Chat autosave complete ✓", style="bold green"), title="Autosave", border_style="green"))
     except Exception as e:
-        console.print(Panel(
-            Text(f"Chat autosave failed: {str(e)}", style="bold red"),
-            title="Autosave Error",
-            border_style="red"
-        ))
+        console.print(Panel(Text(f"Chat autosave failed: {str(e)}", style="bold red"), title="Autosave Error", border_style="red"))
+
+
 
 def find_chat_summaries(history, conf, system_prompt, current_user_input=None):
     """Generate tags from current chat (same as save_chat) and fetch summaries.
@@ -394,7 +377,8 @@ def find_chat_summaries(history, conf, system_prompt, current_user_input=None):
             pass
         return []
 
-def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen", temperature=0.99, max_tokens=32768, baseurl=None, enable_thinking=True):
+def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen",
+              temperature=0.99, max_tokens=32768, baseurl=None, enable_thinking=True):
     # Use provided baseurl or default to baseurl0
     base_url = baseurl 
     client = OpenAI(
@@ -420,15 +404,19 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
             
         # Add current prompt with Qwen's thinking flag
         if enable_thinking:
-                # Qwen3's native thinking format
+            # Qwen3's native thinking format
             messages.append({"role": "system", "content": "Please provide your reasoning in <think> tags before your answer."})
         messages.append({"role": "user", "content": prompt.strip()})
-        
-        # For Qwen, we'll use a single response with its built-in thinking format
-        # Set recommended parameters for thinking mode
+
+        # ✅ FIX: Sanitize messages so Jinja doesn't break on None values
+        for m in messages:
+            if not isinstance(m.get("content"), str):
+                m["content"] = ""
+
         # Start spinner before sending request; stop it on first streamed token
         stop_spinner = start_processing_spinner()
 
+        # Choose temperature/top_p settings based on reasoning mode
         if enable_thinking:
             response = client.chat.completions.create(
                 model="my-model",
@@ -436,7 +424,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                 temperature=0.99,
                 top_p=0.95,
                 max_tokens=max_tokens,
-                stream=True  # Stream the response
+                stream=True
             )
         else:
             response = client.chat.completions.create(
@@ -445,30 +433,23 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                 temperature=0.99,
                 top_p=0.8,
                 max_tokens=max_tokens,
-                stream=True  # Stream the response
+                stream=True
             )
 
-        
         # Stream and collect content
         current_content = ""
         print("\n", end="", flush=True)
-        
-        # Initialize Rich console
         console = Console()
-        
-        # Track if we're in the thinking or answer section
         in_thinking = False
         thinking_content = ""
         answer_content = ""
-        
-        # Live content for streaming display
         live_content = ""
         
         for chunk in response:
             try:
                 if hasattr(chunk, 'choices') and chunk.choices:
                     delta = chunk.choices[0].delta
-                    # Stop spinner on first token (either reasoning or content)
+                    # Stop spinner on first token
                     if stop_spinner is not None:
                         try:
                             stop_spinner()
@@ -477,44 +458,42 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                         finally:
                             stop_spinner = None
                         console.print(" " * 10, end="\r")
+
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
-                        # This is the thinking part
+                        # Thinking part
                         if not in_thinking:
                             current_content += "<think>\n"
                             console.print("\n", end="")
                             in_thinking = True
                         content = delta.reasoning_content
                         thinking_content += content
-                        # Print thinking in dim style
                         console.print(content, style="dim", end="", highlight=False)
                         current_content += content
+
                     elif hasattr(delta, 'content') and delta.content is not None:
-                        # This is the answer part
+                        # Answer part
                         if in_thinking:
                             current_content += "</think>\n\n"
                             console.print("\n", end="")
                             in_thinking = False
-                            # Display collected thinking in a panel
                             console.print(Panel(
                                 Text(thinking_content.strip(), style="dim"),
                                 title="Thinking Process",
                                 border_style="dim"
                             ))
-                            console.print()  # Add spacing
+                            console.print()
                         content = delta.content
                         answer_content += content
-                        # Collect content for live display
                         live_content += content
-                        # Print without markdown for streaming
                         console.print(content, end="", highlight=False)
                         current_content += content
-                    elif delta.role == 'assistant':
-                        # Skip initial role marker
+
+                    elif getattr(delta, "role", None) == "assistant":
                         continue
             except Exception as e:
                 console.print(f"[red]Error: {str(e)}[/red]", flush=True)
         
-        # Ensure spinner is stopped if still running
+        # Ensure spinner is stopped
         if stop_spinner is not None:
             try:
                 stop_spinner()
@@ -522,7 +501,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                 pass
             console.print(" " * 10, end="\r")
 
-        # Close thinking tags and display final panel if we're still in thinking mode
+        # Close thinking tags if still open
         if in_thinking:
             current_content += "</think>\n"
             console.print("\n", end="")
@@ -531,39 +510,29 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
                 title="Thinking Process",
                 border_style="dim"
             ))
-            console.print()  # Add spacing
+            console.print()
         
-        # Add a separator line between streaming and final rendering
         console.print("\n")
         console.print("─" * console.width, style="dim")
         console.print("\n[bold blue]Final Formatted Output:[/bold blue]\n")
         
-        # Render the final answer with proper markdown formatting
         if answer_content.strip():
             console.print(Markdown(answer_content.strip()))
         
-        print("\n")  # New line after response
+        print("\n")  # newline after output
         
-        # Process the complete content
         full_content = current_content
-        
-        # Extract thinking and answer using Qwen's <think> tag format
         think_match = ""
         answer = ""
         
         if "<think>" in full_content and "</think>" in full_content:
             try:
-                # Split at </think> tag
                 parts = full_content.split("</think>", 1)
-                # Extract content between <think> tags
                 think_match = parts[0].split("<think>")[1].strip()
-                # Everything after </think> is the answer
                 answer = parts[1].strip() if len(parts) > 1 else ""
             except IndexError:
-                # If splitting fails, treat everything as answer
                 answer = full_content.strip()
         else:
-            # No think tags found, entire content is the answer
             answer = full_content.strip()
         
         return {
@@ -571,6 +540,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
             "answer": answer,
             "full_response": full_content.strip()
         }
+
     except Exception as e:
         # Stop spinner on error
         try:
@@ -584,6 +554,7 @@ def query_llm(prompt, history=None, context=None, system_prompt=None, base="qwen
             "answer": error_msg,
             "full_response": error_msg
         }
+
 
 if __name__ == "__main__":
     # Initialize conversation context, history, and system prompt
